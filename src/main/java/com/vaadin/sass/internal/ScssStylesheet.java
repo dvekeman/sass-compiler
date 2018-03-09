@@ -21,14 +21,17 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.Writer;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.logging.LogManager;
 import java.util.logging.Logger;
+import java.util.stream.Stream;
 
-import com.yahoo.platform.yui.compressor.CssCompressor;
 import org.w3c.css.sac.CSSException;
 import org.w3c.css.sac.InputSource;
 
@@ -39,10 +42,12 @@ import com.vaadin.sass.internal.parser.ParseException;
 import com.vaadin.sass.internal.parser.Parser;
 import com.vaadin.sass.internal.parser.SCSSParseException;
 import com.vaadin.sass.internal.resolver.ClassloaderResolver;
+import com.vaadin.sass.internal.resolver.FilesystemDirectoryResolver;
 import com.vaadin.sass.internal.resolver.FilesystemResolver;
 import com.vaadin.sass.internal.resolver.ScssStylesheetResolver;
 import com.vaadin.sass.internal.tree.Node;
 import com.vaadin.sass.internal.visitor.ExtendNodeHandler;
+import com.yahoo.platform.yui.compressor.CssCompressor;
 
 public class ScssStylesheet extends Node {
 
@@ -107,7 +112,7 @@ public class ScssStylesheet extends Node {
     }
 
     /**
-     * Main entry point for the SASS compiler. Takes in a file, an optional
+     * Main entry point for the SASS compiler. Takes in an identifier for a file or directory, an optional
      * parent stylesheet, and document and error handlers. Then builds up a
      * ScssStylesheet tree out of it. Calling compile() on it will transform
      * SASS into CSS. Calling printState() will print out the SCSS/CSS.
@@ -156,6 +161,46 @@ public class ScssStylesheet extends Node {
             // Use parent resolvers
             stylesheet.setResolvers(parentStylesheet.getResolvers());
         }
+        
+        List<String> identifiers = new ArrayList<>();
+        if (identifier.endsWith("*")) {
+            String directoryIdentifier = identifier.substring(0, identifier.length() - 2);
+            ScssStylesheetResolver directoryResolver = new FilesystemDirectoryResolver();
+            stylesheet.addResolver(directoryResolver);
+            InputSource directorySource = stylesheet.resolveStylesheet(directoryIdentifier, parentStylesheet);
+            stylesheet.removeResolver(directoryResolver);
+            
+            File directory = new File(directorySource.getURI());
+			if(!directory.isDirectory()){
+                throw new CSSException(String.format(
+                		"Wrong import directive. '%s' from import '%s' must be a directory.", 
+						directoryIdentifier, identifier));
+            }
+            try(Stream<Path> files = Files.walk(directory.toPath(), 1)){
+					files.filter(Files::isRegularFile)
+							.map(Path::getFileName)
+							.map(Path::toString)
+							.map(pathName -> Paths.get(directoryIdentifier, pathName))
+							.map(Path::toString)
+							.forEach(identifiers::add);
+			}
+            
+        } else {
+            identifiers.add(identifier);
+        }
+
+        for(String subIdentifier : identifiers){
+            InputSource source = doGet(subIdentifier, stylesheet, parentStylesheet, documentHandler, errorHandler);
+            if(source != null) {
+                stylesheet.sourceUris.add(source.getURI());
+            }
+        }
+        
+        return stylesheet;
+    }
+    
+    private static InputSource doGet(String identifier, ScssStylesheet stylesheet, ScssStylesheet parentStylesheet,
+                                SCSSDocumentHandler documentHandler, SCSSErrorHandler errorHandler) throws CSSException, IOException {
         InputSource source = stylesheet.resolveStylesheet(identifier,
                 parentStylesheet);
         if (source == null) {
@@ -175,11 +220,9 @@ public class ScssStylesheet extends Node {
             // file name info.
             throw new SCSSParseException(e, identifier);
         }
-
         stylesheet.setCharset(parser.getInputSource().getEncoding());
-        stylesheet.sourceUris.add(source.getURI());
 
-        return stylesheet;
+        return source;
     }
 
     public InputSource resolveStylesheet(String identifier,
@@ -223,6 +266,10 @@ public class ScssStylesheet extends Node {
      */
     public void addResolver(ScssStylesheetResolver resolver) {
         resolvers.add(resolver);
+    }
+    
+    public void removeResolver(ScssStylesheetResolver resolver) {
+        resolvers.remove(resolver);
     }
 
     public List<String> getSourceUris() {
